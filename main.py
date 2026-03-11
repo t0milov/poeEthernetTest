@@ -9,7 +9,15 @@ from tkinter import ttk, messagebox
 import eth_up_down_snr
 
 
-CONFIG_PATH = os.path.join(".", "last_config.json")
+def _get_config_path() -> str:
+    base_dir = os.environ.get("APPDATA") or os.path.expanduser("~")
+    cfg_dir = os.path.join(base_dir, "EthUpDownSnr")
+    os.makedirs(cfg_dir, exist_ok=True)
+    return os.path.join(cfg_dir, "last_config.json")
+
+
+CONFIG_PATH = _get_config_path()
+MAX_LOG_LINES = 3000
 
 
 class App:
@@ -35,8 +43,8 @@ class App:
 
         self.vars: dict[str, tk.StringVar] = {
             "poe_switch_host": tk.StringVar(value="10.1.65.230"),
-            "username": tk.StringVar(value="1"),
-            "password": tk.StringVar(value="1"),
+            "username": tk.StringVar(value="infitest"),
+            "password": tk.StringVar(value=""),
             "iteration_number": tk.StringVar(value="500"),
             "power_off_duration": tk.StringVar(value="10"),
             "power_on_duration": tk.StringVar(value="70"),
@@ -221,6 +229,10 @@ class App:
     def _append_log(self, text: str) -> None:
         self.log_text.configure(state="normal")
         self.log_text.insert("end", text)
+        # Keep only the last MAX_LOG_LINES lines to avoid slowdowns
+        line_count = int(self.log_text.index("end-1c").split(".")[0])
+        if line_count > MAX_LOG_LINES:
+            self.log_text.delete("1.0", f"{line_count - MAX_LOG_LINES + 1}.0")
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
@@ -238,4 +250,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

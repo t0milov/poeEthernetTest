@@ -1,8 +1,8 @@
 ﻿FORM_DATA = {
     "devices_config": {
-        "poe_switch_host": "10.1.65.230",
-        "username": "1",
-        "password": "1",
+        "poe_switch_host": "127.0.0.1",
+        "username": "user",
+        "password": "password",
         "ports": list(range(1, 25)),
     },
     "test_config": {
@@ -32,6 +32,8 @@ LOG_SOCKET_PATH = os.environ.get("LOG_SOCKET_PATH", "")
 CSV_SOCKET_PATH = os.environ.get("CSV_SOCKET_PATH", "")
 TIME_SOCKET_PATH = os.environ.get("TIME_SOCKET_PATH", "")
 
+MAC_RE = re.compile(r"([0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}")
+
 
 class StopRequested(Exception):
     pass
@@ -43,12 +45,15 @@ def _open_snr(
     password: str,
     stop_event: Optional["threading.Event"] = None,
     write_log: Optional[Callable[[str], None]] = None,
+    enter_config: bool = True,
 ) -> "TelnetSNRController":
     snr = TelnetSNRController(host, stop_event=stop_event, write_log=write_log)
     snr.write_command(username, b"assword:")
     snr.write_command(password, b"#")
     snr.write_command("enable", b"#")
     snr.write_command("terminal length 0", b"#")
+    if enter_config:
+        snr.write_command("config", b"(config)#")
     return snr
 
 
@@ -63,6 +68,45 @@ def _sleep_with_stop(seconds: int, stop_event: Optional["threading.Event"]) -> b
             return True
         time.sleep(0.2)
     return False
+
+
+def _mac_to_serial(mac: str) -> str:
+    parts = re.split(r"[-:]", mac)
+    if len(parts) < 3:
+        return "NA"
+    last_three = parts[-3:]
+    try:
+        decimals = [str(int(x, 16)) for x in last_three]
+    except ValueError:
+        return "NA"
+    return "".join(decimals)
+
+
+def _get_port_serials(
+    host: str,
+    username: str,
+    password: str,
+    ports: list[int],
+    stop_event: Optional["threading.Event"],
+    write_log: Optional[Callable[[str], None]],
+) -> Dict[int, str]:
+    snr = _open_snr(host, username, password, stop_event, write_log, enter_config=True)
+    port_to_sn: Dict[int, str] = {}
+    try:
+        for port_id in ports:
+            if stop_event is not None and stop_event.is_set():
+                raise StopRequested()
+
+            resp = snr.write_command(f"show mac-address-table interface eth1/0/{port_id}", b"#")
+            match = MAC_RE.search(resp)
+            if match:
+                port_to_sn[port_id] = _mac_to_serial(match.group(0))
+            else:
+                port_to_sn[port_id] = "NA"
+    finally:
+        snr.disconnect()
+
+    return port_to_sn
 
 
 def run_test(
@@ -94,6 +138,18 @@ def run_test(
     tsc.write_csv("#,param|dev," + ",".join(f"dev_{p}" for p in all_ports) + ",")
 
     try:
+        port_serials = _get_port_serials(
+            poe_switch_host,
+            username,
+            password,
+            all_ports,
+            stop_event,
+            tsc.write_log,
+        )
+        sn_values = ",".join(port_serials.get(p, "NA") for p in all_ports)
+        tsc.write_csv(f"sn,serial,{sn_values},")
+        tsc.write_log("Port serial numbers: " + ", ".join(f"{p}:{port_serials.get(p, 'NA')}" for p in all_ports))
+
         for iteration_index in range(iteration_number):
             if stop_event is not None and stop_event.is_set():
                 tsc.write_log("Stop requested, ending test")
@@ -110,8 +166,7 @@ def run_test(
 
             if ports_to_cycle:
                 tsc.write_log(f"Enabling ports: {ports_to_cycle}")
-                snr = _open_snr(poe_switch_host, username, password, stop_event, tsc.write_log)
-                snr.write_command("config", b"#")
+                snr = _open_snr(poe_switch_host, username, password, stop_event, tsc.write_log, enter_config=True)
                 for port_id in ports_to_cycle:
                     snr.write_command(f"int eth1/0/{port_id}", b"#")
                     snr.write_command("power inline enable", b"#")
@@ -143,7 +198,7 @@ def run_test(
                     tsc.write_log("All ports are up, stopping check early")
                     break
 
-                snr = _open_snr(poe_switch_host, username, password, stop_event, tsc.write_log)
+                snr = _open_snr(poe_switch_host, username, password, stop_event, tsc.write_log, enter_config=True)
                 resp = snr.write_command("show interface ethernet status", b"#")
                 tsc.write_log(resp)
                 snr.disconnect()
@@ -195,8 +250,7 @@ def run_test(
             ports_to_power_off = [p for p in ports_to_cycle if p in ports_confirmed_up]
             if ports_to_power_off:
                 tsc.write_log(f"Disabling ports: {ports_to_power_off}")
-                snr = _open_snr(poe_switch_host, username, password, stop_event, tsc.write_log)
-                snr.write_command("config", b"#")
+                snr = _open_snr(poe_switch_host, username, password, stop_event, tsc.write_log, enter_config=True)
                 for port_id in ports_to_power_off:
                     snr.write_command(f"int eth1/0/{port_id}", b"#")
                     snr.write_command("no power inline enable", b"#")
@@ -287,7 +341,7 @@ class TelnetSNRController:
         self,
         host: str,
         port: int = 23,
-        write_log=lambda data: (print(data)),
+        write_log=lambda data: (print(data), sys.stdout.flush()),
         stop_event: Optional["threading.Event"] = None,
     ) -> None:
         self.host = host
@@ -372,11 +426,14 @@ class TelnetSNRController:
                 if self.socket is None:
                     raise ConnectionError(f"({self.host}:{self.port}) Socket is not connected.")
 
-                if not shadow:
-                    self.write_log(f"(SNR: {self.host}) {message}")
+                # if not shadow:
+                #     self.write_log(f"(SNR: {self.host}) {message}")
 
                 self.socket.sendall((message + "\r").encode())
                 out = self._read_until(device_prompt_bytes).decode("utf-8", errors="replace")
+
+                if not shadow:
+                    self.write_log(f"(SNR: {self.host}) \n\r # {out}")
 
                 return out
             except Exception as e:
@@ -406,5 +463,4 @@ if __name__ == "__main__":
         main(json.loads(config_json))
     else:
         main()
-
 
