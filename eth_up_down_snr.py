@@ -194,8 +194,8 @@ def run_test(
                 return
 
             tsc.write_log(f"=== Iteration {iteration_index + 1}/{iteration_number} ===")
-            tsc.write_log(f"Extra monitor ports: {sorted(extra_monitor_ports.keys())}")
-            tsc.write_log(f"Permanently excluded: {sorted(permanently_excluded_ports)}")
+            tsc.write_log(f"Extra monitor ports: {', '.join(f'{p} ({port_serials.get(p, \"NA\")})' for p in sorted(extra_monitor_ports.keys()))}")
+            tsc.write_log(f"Permanently excluded: {', '.join(f'{p} ({port_serials.get(p, \"NA\")})' for p in sorted(permanently_excluded_ports))}")
 
             ports_to_cycle = [
                 p for p in all_ports
