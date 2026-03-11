@@ -1,4 +1,4 @@
-﻿FORM_DATA = {
+FORM_DATA = {
     "devices_config": {
         "poe_switch_host": "127.0.0.1",
         "username": "user",
@@ -12,6 +12,7 @@
         "iteration_time_limit": 80,
         "extra_time_limit": 300,
     },
+    "debug_snr": False,
 }
 
 import os
@@ -47,11 +48,12 @@ def _open_snr(
     write_log: Optional[Callable[[str], None]] = None,
     enter_config: bool = True,
 ) -> "TelnetSNRController":
-    snr = TelnetSNRController(host, stop_event=stop_event, write_log=write_log)
+    debug_snr = bool(FORM_DATA.get("debug_snr", False))
+    snr = TelnetSNRController(host, stop_event=stop_event, write_log=write_log, debug_snr=debug_snr)
     snr.write_command(username, b"assword:")
-    snr.write_command(password, b"#")
-    snr.write_command("enable", b"#")
-    snr.write_command("terminal length 0", b"#")
+    snr.write_command(password)
+    snr.write_command("enable")
+    snr.write_command("terminal length 0")
     if enter_config:
         snr.write_command("config", b"(config)#")
     return snr
@@ -70,6 +72,9 @@ def _sleep_with_stop(seconds: int, stop_event: Optional["threading.Event"]) -> b
     return False
 
 
+SERIAL_LENGTH = 6
+
+
 def _mac_to_serial(mac: str) -> str:
     parts = re.split(r"[-:]", mac)
     if len(parts) < 3:
@@ -79,7 +84,8 @@ def _mac_to_serial(mac: str) -> str:
         decimals = [str(int(x, 16)) for x in last_three]
     except ValueError:
         return "NA"
-    return "".join(decimals)
+    raw = "".join(decimals)
+    return raw.zfill(SERIAL_LENGTH)[-SERIAL_LENGTH:]
 
 
 def _get_port_serials(
@@ -97,7 +103,7 @@ def _get_port_serials(
             if stop_event is not None and stop_event.is_set():
                 raise StopRequested()
 
-            resp = snr.write_command(f"show mac-address-table interface eth1/0/{port_id}", b"#")
+            resp = snr.write_command(f"show mac-address-table interface eth1/0/{port_id}")
             match = MAC_RE.search(resp)
             if match:
                 port_to_sn[port_id] = _mac_to_serial(match.group(0))
@@ -138,14 +144,50 @@ def run_test(
     tsc.write_csv("#,param|dev," + ",".join(f"dev_{p}" for p in all_ports) + ",")
 
     try:
-        port_serials = _get_port_serials(
-            poe_switch_host,
-            username,
-            password,
-            all_ports,
-            stop_event,
-            tsc.write_log,
-        )
+        # Pre-check: enable all ports, wait power_on_duration, then verify MACs (10 attempts, 10 sec apart)
+        tsc.write_log("Pre-check: enabling all ports")
+        snr = _open_snr(poe_switch_host, username, password, stop_event, tsc.write_log, enter_config=True)
+        for port_id in all_ports:
+            snr.write_command(f"int eth1/0/{port_id}")
+            snr.write_command("power inline enable")
+            snr.write_command("exit")
+        snr.disconnect()
+
+        tsc.write_log(f"Pre-check: waiting {power_on_duration} sec for devices to boot")
+        if _sleep_with_stop(power_on_duration, stop_event):
+            tsc.write_log("Stop requested, ending test")
+            return
+
+        port_serials: Dict[int, str] = {}
+        for attempt in range(10):
+            if stop_event is not None and stop_event.is_set():
+                tsc.write_log("Stop requested, ending test")
+                return
+            tsc.write_log(f"Pre-check: MAC check attempt {attempt + 1}/10")
+            port_serials = _get_port_serials(
+                poe_switch_host,
+                username,
+                password,
+                all_ports,
+                stop_event,
+                tsc.write_log,
+            )
+            ports_without_mac = [p for p in all_ports if port_serials.get(p) == "NA"]
+            if not ports_without_mac:
+                tsc.write_log("Pre-check: all ports have MAC addresses, starting main test")
+                break
+            tsc.write_log(f"Pre-check: ports without MAC: {ports_without_mac}")
+            if attempt < 9:
+                if _sleep_with_stop(10, stop_event):
+                    tsc.write_log("Stop requested, ending test")
+                    return
+        else:
+            tsc.write_log(
+                f"Pre-check failed: after 10 attempts not all ports have MAC addresses. "
+                f"Missing: {ports_without_mac}. Test aborted."
+            )
+            return
+
         sn_values = ",".join(port_serials.get(p, "NA") for p in all_ports)
         tsc.write_csv(f"sn,serial,{sn_values},")
         tsc.write_log("Port serial numbers: " + ", ".join(f"{p}:{port_serials.get(p, 'NA')}" for p in all_ports))
@@ -156,8 +198,10 @@ def run_test(
                 return
 
             tsc.write_log(f"=== Iteration {iteration_index + 1}/{iteration_number} ===")
-            tsc.write_log(f"Extra monitor ports: {sorted(extra_monitor_ports.keys())}")
-            tsc.write_log(f"Permanently excluded: {sorted(permanently_excluded_ports)}")
+            extra_fmt = "[" + ", ".join(f"{p}({port_serials.get(p, 'NA')})" for p in sorted(extra_monitor_ports.keys())) + "]"
+            tsc.write_log(f"Extra monitor ports: {extra_fmt}")
+            excluded_fmt = "[" + ", ".join(f"{p}({port_serials.get(p, 'NA')})" for p in sorted(permanently_excluded_ports)) + "]"
+            tsc.write_log(f"Permanently excluded: {excluded_fmt}")
 
             ports_to_cycle = [
                 p for p in all_ports
@@ -168,15 +212,16 @@ def run_test(
                 tsc.write_log(f"Enabling ports: {ports_to_cycle}")
                 snr = _open_snr(poe_switch_host, username, password, stop_event, tsc.write_log, enter_config=True)
                 for port_id in ports_to_cycle:
-                    snr.write_command(f"int eth1/0/{port_id}", b"#")
-                    snr.write_command("power inline enable", b"#")
-                    snr.write_command("exit", b"(config)#")
+                    snr.write_command(f"int eth1/0/{port_id}")
+                    snr.write_command("power inline enable")
+                    snr.write_command("exit")
                 snr.disconnect()
 
-                tsc.write_log(f"Waiting {power_on_duration} sec for devices to boot")
-                if _sleep_with_stop(power_on_duration, stop_event):
-                    tsc.write_log("Stop requested, ending test")
-                    return
+                if iteration_index > 0:
+                    tsc.write_log(f"Waiting {power_on_duration} sec for devices to boot")
+                    if _sleep_with_stop(power_on_duration, stop_event):
+                        tsc.write_log("Stop requested, ending test")
+                        return
             else:
                 tsc.write_log("No ports to cycle (all in extra monitor or excluded)")
 
@@ -199,8 +244,7 @@ def run_test(
                     break
 
                 snr = _open_snr(poe_switch_host, username, password, stop_event, tsc.write_log, enter_config=True)
-                resp = snr.write_command("show interface ethernet status", b"#")
-                tsc.write_log(resp)
+                resp = snr.write_command("show interface ethernet status")
                 snr.disconnect()
 
                 for line in resp.splitlines():
@@ -252,19 +296,20 @@ def run_test(
                 tsc.write_log(f"Disabling ports: {ports_to_power_off}")
                 snr = _open_snr(poe_switch_host, username, password, stop_event, tsc.write_log, enter_config=True)
                 for port_id in ports_to_power_off:
-                    snr.write_command(f"int eth1/0/{port_id}", b"#")
-                    snr.write_command("no power inline enable", b"#")
-                    snr.write_command("exit", b"(config)#")
+                    snr.write_command(f"int eth1/0/{port_id}")
+                    snr.write_command("no power inline enable")
+                    snr.write_command("exit")
                 snr.disconnect()
 
             if len(permanently_excluded_ports) == len(all_ports):
                 tsc.write_log("All ports permanently excluded, stopping test")
                 break
 
-            tsc.write_log(f"Sleeping {power_off_duration} sec before next iteration")
-            if _sleep_with_stop(power_off_duration, stop_event):
-                tsc.write_log("Stop requested, ending test")
-                return
+            if iteration_index < iteration_number - 1:
+                tsc.write_log(f"Sleeping {power_off_duration} sec before next iteration")
+                if _sleep_with_stop(power_off_duration, stop_event):
+                    tsc.write_log("Stop requested, ending test")
+                    return
     except StopRequested:
         tsc.write_log("Stop requested, ending test")
         return
@@ -343,11 +388,13 @@ class TelnetSNRController:
         port: int = 23,
         write_log=lambda data: (print(data), sys.stdout.flush()),
         stop_event: Optional["threading.Event"] = None,
+        debug_snr: bool = True,
     ) -> None:
         self.host = host
         self.port = port
         self.write_log = write_log
         self.stop_event = stop_event
+        self.debug_snr = debug_snr
         self.socket: Optional[socket.socket] = None
         self.timeout = 15.0
         self.connect()
@@ -432,7 +479,7 @@ class TelnetSNRController:
                 self.socket.sendall((message + "\r").encode())
                 out = self._read_until(device_prompt_bytes).decode("utf-8", errors="replace")
 
-                if not shadow:
+                if not shadow and self.debug_snr:
                     self.write_log(f"(SNR: {self.host}) \n\r # {out}")
 
                 return out

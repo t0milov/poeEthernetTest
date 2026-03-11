@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 import queue
 import sys
@@ -52,6 +52,8 @@ class App:
             "extra_time_limit": tk.StringVar(value="300"),
         }
 
+        self.debug_snr_var = tk.BooleanVar(value=False)
+
         row = 0
         self._add_row(form, row, "PoE switch host", "poe_switch_host"); row += 1
         self._add_row(form, row, "Username", "username"); row += 1
@@ -61,6 +63,9 @@ class App:
         self._add_row(form, row, "Power on duration (sec)", "power_on_duration"); row += 1
         self._add_row(form, row, "Iteration time limit (sec)", "iteration_time_limit"); row += 1
         self._add_row(form, row, "Extra time limit (sec)", "extra_time_limit"); row += 1
+
+        debug_cb = ttk.Checkbutton(form, text="Debug SNR telnet output", variable=self.debug_snr_var)
+        debug_cb.grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         ports_frame = ttk.LabelFrame(main, text="Ports (1-48)", padding=10)
         ports_frame.pack(fill="x", pady=(10, 0))
@@ -117,6 +122,7 @@ class App:
                     "iteration_time_limit": int(self.vars["iteration_time_limit"].get()),
                     "extra_time_limit": int(self.vars["extra_time_limit"].get()),
                 },
+                "debug_snr": bool(self.debug_snr_var.get()),
             }
         except ValueError:
             raise ValueError("Numeric fields must be valid integers.")
@@ -156,6 +162,10 @@ class App:
             self.vars["iteration_time_limit"].set(str(test["iteration_time_limit"]))
         if "extra_time_limit" in test:
             self.vars["extra_time_limit"].set(str(test["extra_time_limit"]))
+
+        debug_snr = data.get("debug_snr")
+        if isinstance(debug_snr, bool):
+            self.debug_snr_var.set(debug_snr)
 
     def _save_config(self, config: dict) -> None:
         try:
