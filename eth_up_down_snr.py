@@ -1,4 +1,4 @@
-FORM_DATA = {
+﻿FORM_DATA = {
     "devices_config": {
         "poe_switch_host": "127.0.0.1",
         "username": "user",
@@ -51,9 +51,9 @@ def _open_snr(
     debug_snr = bool(FORM_DATA.get("debug_snr", False))
     snr = TelnetSNRController(host, stop_event=stop_event, write_log=write_log, debug_snr=debug_snr)
     snr.write_command(username, b"assword:")
-    snr.write_command(password, b"#")
-    snr.write_command("enable", b"#")
-    snr.write_command("terminal length 0", b"#")
+    snr.write_command(password)
+    snr.write_command("enable")
+    snr.write_command("terminal length 0")
     if enter_config:
         snr.write_command("config", b"(config)#")
     return snr
@@ -72,6 +72,9 @@ def _sleep_with_stop(seconds: int, stop_event: Optional["threading.Event"]) -> b
     return False
 
 
+SERIAL_LENGTH = 6
+
+
 def _mac_to_serial(mac: str) -> str:
     parts = re.split(r"[-:]", mac)
     if len(parts) < 3:
@@ -81,7 +84,8 @@ def _mac_to_serial(mac: str) -> str:
         decimals = [str(int(x, 16)) for x in last_three]
     except ValueError:
         return "NA"
-    return "".join(decimals)
+    raw = "".join(decimals)
+    return raw.zfill(SERIAL_LENGTH)[-SERIAL_LENGTH:]
 
 
 def _get_port_serials(
@@ -99,7 +103,7 @@ def _get_port_serials(
             if stop_event is not None and stop_event.is_set():
                 raise StopRequested()
 
-            resp = snr.write_command(f"show mac-address-table interface eth1/0/{port_id}", b"#")
+            resp = snr.write_command(f"show mac-address-table interface eth1/0/{port_id}")
             match = MAC_RE.search(resp)
             if match:
                 port_to_sn[port_id] = _mac_to_serial(match.group(0))
@@ -144,9 +148,9 @@ def run_test(
         tsc.write_log("Pre-check: enabling all ports")
         snr = _open_snr(poe_switch_host, username, password, stop_event, tsc.write_log, enter_config=True)
         for port_id in all_ports:
-            snr.write_command(f"int eth1/0/{port_id}", b"#")
-            snr.write_command("power inline enable", b"#")
-            snr.write_command("exit", b"(config)#")
+            snr.write_command(f"int eth1/0/{port_id}")
+            snr.write_command("power inline enable")
+            snr.write_command("exit")
         snr.disconnect()
 
         tsc.write_log(f"Pre-check: waiting {power_on_duration} sec for devices to boot")
@@ -194,9 +198,9 @@ def run_test(
                 return
 
             tsc.write_log(f"=== Iteration {iteration_index + 1}/{iteration_number} ===")
-            extra_fmt = ", ".join(f"{p} ({port_serials.get(p, 'NA')})" for p in sorted(extra_monitor_ports.keys()))
+            extra_fmt = "[" + ", ".join(f"{p}({port_serials.get(p, 'NA')})" for p in sorted(extra_monitor_ports.keys())) + "]"
             tsc.write_log(f"Extra monitor ports: {extra_fmt}")
-            excluded_fmt = ", ".join(f"{p} ({port_serials.get(p, 'NA')})" for p in sorted(permanently_excluded_ports))
+            excluded_fmt = "[" + ", ".join(f"{p}({port_serials.get(p, 'NA')})" for p in sorted(permanently_excluded_ports)) + "]"
             tsc.write_log(f"Permanently excluded: {excluded_fmt}")
 
             ports_to_cycle = [
@@ -208,9 +212,9 @@ def run_test(
                 tsc.write_log(f"Enabling ports: {ports_to_cycle}")
                 snr = _open_snr(poe_switch_host, username, password, stop_event, tsc.write_log, enter_config=True)
                 for port_id in ports_to_cycle:
-                    snr.write_command(f"int eth1/0/{port_id}", b"#")
-                    snr.write_command("power inline enable", b"#")
-                    snr.write_command("exit", b"(config)#")
+                    snr.write_command(f"int eth1/0/{port_id}")
+                    snr.write_command("power inline enable")
+                    snr.write_command("exit")
                 snr.disconnect()
 
                 tsc.write_log(f"Waiting {power_on_duration} sec for devices to boot")
@@ -239,8 +243,7 @@ def run_test(
                     break
 
                 snr = _open_snr(poe_switch_host, username, password, stop_event, tsc.write_log, enter_config=True)
-                resp = snr.write_command("show interface ethernet status", b"#")
-                tsc.write_log(resp)
+                resp = snr.write_command("show interface ethernet status")
                 snr.disconnect()
 
                 for line in resp.splitlines():
@@ -292,9 +295,9 @@ def run_test(
                 tsc.write_log(f"Disabling ports: {ports_to_power_off}")
                 snr = _open_snr(poe_switch_host, username, password, stop_event, tsc.write_log, enter_config=True)
                 for port_id in ports_to_power_off:
-                    snr.write_command(f"int eth1/0/{port_id}", b"#")
-                    snr.write_command("no power inline enable", b"#")
-                    snr.write_command("exit", b"(config)#")
+                    snr.write_command(f"int eth1/0/{port_id}")
+                    snr.write_command("no power inline enable")
+                    snr.write_command("exit")
                 snr.disconnect()
 
             if len(permanently_excluded_ports) == len(all_ports):
