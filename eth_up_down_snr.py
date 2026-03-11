@@ -1,4 +1,4 @@
-﻿FORM_DATA = {
+FORM_DATA = {
     "devices_config": {
         "poe_switch_host": "127.0.0.1",
         "username": "user",
@@ -217,10 +217,11 @@ def run_test(
                     snr.write_command("exit")
                 snr.disconnect()
 
-                tsc.write_log(f"Waiting {power_on_duration} sec for devices to boot")
-                if _sleep_with_stop(power_on_duration, stop_event):
-                    tsc.write_log("Stop requested, ending test")
-                    return
+                if iteration_index > 0:
+                    tsc.write_log(f"Waiting {power_on_duration} sec for devices to boot")
+                    if _sleep_with_stop(power_on_duration, stop_event):
+                        tsc.write_log("Stop requested, ending test")
+                        return
             else:
                 tsc.write_log("No ports to cycle (all in extra monitor or excluded)")
 
@@ -304,10 +305,11 @@ def run_test(
                 tsc.write_log("All ports permanently excluded, stopping test")
                 break
 
-            tsc.write_log(f"Sleeping {power_off_duration} sec before next iteration")
-            if _sleep_with_stop(power_off_duration, stop_event):
-                tsc.write_log("Stop requested, ending test")
-                return
+            if iteration_index < iteration_number - 1:
+                tsc.write_log(f"Sleeping {power_off_duration} sec before next iteration")
+                if _sleep_with_stop(power_off_duration, stop_event):
+                    tsc.write_log("Stop requested, ending test")
+                    return
     except StopRequested:
         tsc.write_log("Stop requested, ending test")
         return
