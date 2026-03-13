@@ -79,13 +79,13 @@ def _mac_to_serial(mac: str) -> str:
     parts = re.split(r"[-:]", mac)
     if len(parts) < 3:
         return "NA"
-    last_three = parts[-3:]
+
     try:
-        decimals = [str(int(x, 16)) for x in last_three]
+        serial_value = int("".join(parts[-3:]), 16)
     except ValueError:
         return "NA"
-    raw = "".join(decimals)
-    return raw.zfill(SERIAL_LENGTH)[-SERIAL_LENGTH:]
+
+    return str(serial_value).zfill(SERIAL_LENGTH)
 
 
 def _get_port_serials(
@@ -103,6 +103,7 @@ def _get_port_serials(
             if stop_event is not None and stop_event.is_set():
                 raise StopRequested()
 
+            snr.write_command(f"clear mac-address-table dynamic interface ethernet 1/0/{port_id}")
             resp = snr.write_command(f"show mac-address-table interface eth1/0/{port_id}")
             match = MAC_RE.search(resp)
             if match:
@@ -197,6 +198,7 @@ def run_test(
                 tsc.write_log("Stop requested, ending test")
                 return
 
+            iteration_started_at = time.time()
             tsc.write_log(f"=== Iteration {iteration_index + 1}/{iteration_number} ===")
             extra_fmt = "[" + ", ".join(f"{p}({port_serials.get(p, 'NA')})" for p in sorted(extra_monitor_ports.keys())) + "]"
             tsc.write_log(f"Extra monitor ports: {extra_fmt}")
@@ -269,7 +271,7 @@ def run_test(
             for port_id in failed_ports:
                 if port_id in ports_to_cycle:
                     tsc.write_log(f"Port 1/0/{port_id} failed, adding to extra monitor")
-                    extra_monitor_ports[port_id] = now
+                    extra_monitor_ports[port_id] = iteration_started_at
 
             now = time.time()
             for port_id in list(extra_monitor_ports.keys()):
