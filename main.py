@@ -9,7 +9,7 @@ from tkinter import ttk, messagebox
 import eth_up_down_snr
 
 
-def _get_config_path() -> str:
+def _get_config_path():
     base_dir = os.environ.get("APPDATA") or os.path.expanduser("~")
     cfg_dir = os.path.join(base_dir, "EthUpDownSnr")
     os.makedirs(cfg_dir, exist_ok=True)
@@ -21,30 +21,31 @@ MAX_LOG_LINES = 3000
 
 
 class App:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root):
         self.root = root
         self.root.title("EthUpDownSnr Launcher")
         self.root.geometry("820x720")
 
-        self.worker_thread: threading.Thread | None = None
+        self.worker_thread = None
         self.stop_event = threading.Event()
-        self.log_queue: queue.Queue[str] = queue.Queue()
+        self.log_queue = queue.Queue()
 
         self._build_ui()
         self._load_config()
         self._poll_logs()
 
-    def _build_ui(self) -> None:
+    def _build_ui(self):
         main = ttk.Frame(self.root, padding=12)
         main.pack(fill="both", expand=True)
 
         form = ttk.LabelFrame(main, text="Config", padding=10)
         form.pack(fill="x")
 
-        self.vars: dict[str, tk.StringVar] = {
+        self.vars = {
             "poe_switch_host": tk.StringVar(value="10.1.65.230"),
             "username": tk.StringVar(value="infitest"),
             "password": tk.StringVar(value=""),
+            "device_default_ip": tk.StringVar(value="192.168.1.1"),
             "iteration_number": tk.StringVar(value="500"),
             "power_off_duration": tk.StringVar(value="10"),
             "power_on_duration": tk.StringVar(value="70"),
@@ -58,6 +59,7 @@ class App:
         self._add_row(form, row, "PoE switch host", "poe_switch_host"); row += 1
         self._add_row(form, row, "Username", "username"); row += 1
         self._add_row(form, row, "Password", "password", show="*"); row += 1
+        self._add_row(form, row, "Device default IP", "device_default_ip"); row += 1
         self._add_row(form, row, "Iterations", "iteration_number"); row += 1
         self._add_row(form, row, "Power off duration (sec)", "power_off_duration"); row += 1
         self._add_row(form, row, "Power on duration (sec)", "power_on_duration"); row += 1
@@ -70,7 +72,7 @@ class App:
         ports_frame = ttk.LabelFrame(main, text="Ports (1-48)", padding=10)
         ports_frame.pack(fill="x", pady=(10, 0))
 
-        self.port_vars: dict[int, tk.BooleanVar] = {}
+        self.port_vars = {}
         for idx in range(48):
             port_id = idx + 1
             var = tk.BooleanVar(value=True)
@@ -100,12 +102,12 @@ class App:
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    def _add_row(self, parent: ttk.Frame, row: int, label: str, key: str, show: str | None = None) -> None:
+    def _add_row(self, parent, row, label, key, show=None):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         entry = ttk.Entry(parent, textvariable=self.vars[key], width=30, show=show or "")
         entry.grid(row=row, column=1, sticky="w", pady=4)
 
-    def _config_from_ui(self) -> dict:
+    def _config_from_ui(self):
         try:
             selected_ports = [p for p, v in self.port_vars.items() if v.get()]
             return {
@@ -113,6 +115,7 @@ class App:
                     "poe_switch_host": self.vars["poe_switch_host"].get().strip(),
                     "username": self.vars["username"].get().strip(),
                     "password": self.vars["password"].get(),
+                    "device_default_ip": self.vars["device_default_ip"].get().strip(),
                     "ports": selected_ports,
                 },
                 "test_config": {
@@ -127,7 +130,7 @@ class App:
         except ValueError:
             raise ValueError("Numeric fields must be valid integers.")
 
-    def _load_config(self) -> None:
+    def _load_config(self):
         if not os.path.exists(CONFIG_PATH):
             return
 
@@ -146,6 +149,8 @@ class App:
             self.vars["username"].set(str(devices["username"]))
         if "password" in devices:
             self.vars["password"].set(str(devices["password"]))
+        if "device_default_ip" in devices:
+            self.vars["device_default_ip"].set(str(devices["device_default_ip"]))
 
         ports = devices.get("ports")
         if isinstance(ports, list):
@@ -167,14 +172,14 @@ class App:
         if isinstance(debug_snr, bool):
             self.debug_snr_var.set(debug_snr)
 
-    def _save_config(self, config: dict) -> None:
+    def _save_config(self, config):
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
                 json.dump(config, fh, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
-    def start(self) -> None:
+    def start(self):
         if self.worker_thread is not None and self.worker_thread.is_alive():
             return
 
@@ -203,7 +208,7 @@ class App:
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
 
-    def _run_test_thread(self, config: dict) -> None:
+    def _run_test_thread(self, config):
         try:
             eth_up_down_snr.main(
                 config,
@@ -216,18 +221,18 @@ class App:
             self.log_queue.put("\nProcess finished.\n")
             self.root.after(0, self._reset_buttons)
 
-    def _reset_buttons(self) -> None:
+    def _reset_buttons(self):
         self.start_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
 
-    def stop(self) -> None:
+    def stop(self):
         if self.worker_thread is None or not self.worker_thread.is_alive():
             return
 
         self._append_log("Stopping test...\n")
         self.stop_event.set()
 
-    def _poll_logs(self) -> None:
+    def _poll_logs(self):
         try:
             while True:
                 line = self.log_queue.get_nowait()
@@ -236,7 +241,7 @@ class App:
             pass
         self.root.after(100, self._poll_logs)
 
-    def _append_log(self, text: str) -> None:
+    def _append_log(self, text):
         self.log_text.configure(state="normal")
         self.log_text.insert("end", text)
         # Keep only the last MAX_LOG_LINES lines to avoid slowdowns
@@ -246,13 +251,13 @@ class App:
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
-    def on_close(self) -> None:
+    def on_close(self):
         if self.worker_thread is not None and self.worker_thread.is_alive():
             self.stop_event.set()
         self.root.destroy()
 
 
-def main() -> None:
+def main():
     root = tk.Tk()
     App(root)
     root.mainloop()

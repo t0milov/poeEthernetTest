@@ -1,9 +1,10 @@
-﻿FORM_DATA = {
+FORM_DATA = {
     "devices_config": {
         "poe_switch_host": "127.0.0.1",
         "username": "user",
         "password": "password",
         "ports": list(range(1, 25)),
+        "device_default_ip": "192.168.1.1",
     },
     "test_config": {
         "iteration_number": 500,
@@ -23,7 +24,6 @@ import subprocess
 import time
 import re
 
-from typing import Any, Dict, Optional, Callable
 from datetime import timedelta, datetime
 
 
@@ -41,14 +41,7 @@ class StopRequested(Exception):
     pass
 
 
-def _open_snr(
-    host: str,
-    username: str,
-    password: str,
-    stop_event: Optional["threading.Event"] = None,
-    write_log: Optional[Callable[[str], None]] = None,
-    enter_config: bool = True,
-) -> "TelnetSNRController":
+def _open_snr(host, username, password, stop_event=None, write_log=None, enter_config=True):
     debug_snr = bool(FORM_DATA.get("debug_snr", False))
     snr = TelnetSNRController(host, stop_event=stop_event, write_log=write_log, debug_snr=debug_snr)
     snr.write_command(username, b"assword:")
@@ -60,10 +53,7 @@ def _open_snr(
     return snr
 
 
-def _ping_broadcast(
-    host: str,
-    write_log: Optional[Callable[[str], None]] = None,
-) -> None:
+def _ping_broadcast(host, write_log=None):
     """Send broadcast ping to switch host to help initialize MAC addresses on switch."""
     try:
         if sys.platform == "win32":
@@ -75,7 +65,7 @@ def _ping_broadcast(
             write_log(f"Broadcast ping to {host} failed: {e}")
 
 
-def _sleep_with_stop(seconds: int, stop_event: Optional["threading.Event"]) -> bool:
+def _sleep_with_stop(seconds, stop_event):
     if stop_event is None:
         time.sleep(seconds)
         return False
@@ -91,7 +81,7 @@ def _sleep_with_stop(seconds: int, stop_event: Optional["threading.Event"]) -> b
 SERIAL_LENGTH = 6
 
 
-def _mac_to_serial(mac: str) -> str:
+def _mac_to_serial(mac):
     parts = re.split(r"[-:]", mac)
     if len(parts) < 3:
         return "NA"
@@ -104,14 +94,7 @@ def _mac_to_serial(mac: str) -> str:
     return str(serial_value).zfill(SERIAL_LENGTH)
 
 
-def _clear_port_mac_addresses(
-    host: str,
-    username: str,
-    password: str,
-    ports: list[int],
-    stop_event: Optional["threading.Event"],
-    write_log: Optional[Callable[[str], None]],
-) -> None:
+def _clear_port_mac_addresses(host, username, password, ports, stop_event, write_log):
     snr = _open_snr(host, username, password, stop_event, write_log, enter_config=False)
     try:
         for port_id in ports:
@@ -122,16 +105,115 @@ def _clear_port_mac_addresses(
         snr.disconnect()
 
 
-def _get_port_serials(
-    host: str,
-    username: str,
-    password: str,
-    ports: list[int],
-    stop_event: Optional["threading.Event"],
-    write_log: Optional[Callable[[str], None]],
-) -> Dict[int, str]:
+def _recover_macs_via_device_telnet(
+    poe_switch_host,
+    username,
+    password,
+    all_ports,
+    ports_without_mac,
+    device_default_ip,
+    stop_event,
+    write_log,
+):
+    """Дополнительный способ получения MAC-адресов:
+    - Оставляем PoE включённым.
+    - Выключаем Ethernet (shutdown) на всех портах.
+    - Для каждого проблемного порта:
+        * включаем Ethernet (no shutdown),
+        * пытаемся подключиться по telnet к device_default_ip,
+        * перечитываем MAC-таблицу для порта.
+    """
+    if not device_default_ip:
+        write_log("Recover MACs via telnet skipped: device_default_ip is empty")
+        return {}
+
+    write_log(
+        "Recover MACs via telnet: shutting down Ethernet on all ports "
+        "and sequentially enabling ports with telnet attempts to devices"
+    )
+
+    recovered = {}
+    login_failed_ports = []
+    snr = _open_snr(poe_switch_host, username, password, stop_event, write_log, enter_config=True)
+    try:
+        # Выключаем Ethernet на всех портах (PoE не трогаем)
+        for port_id in all_ports:
+            if stop_event is not None and stop_event.is_set():
+                raise StopRequested()
+            snr.write_command(f"int eth1/0/{port_id}")
+            snr.write_command("shutdown")
+            snr.write_command("exit")
+
+        # Поочередно работаем с каждым портом без MAC
+        for port_id in ports_without_mac:
+            if stop_event is not None and stop_event.is_set():
+                raise StopRequested()
+
+            write_log(f"Recover MACs via telnet: enabling Ethernet on port 1/0/{port_id}")
+            snr.write_command(f"int eth1/0/{port_id}")
+            snr.write_command("no shutdown")
+            snr.write_command("exit")
+
+            # Даём порту подняться
+            if _sleep_with_stop(5, stop_event):
+                write_log("Stop requested while waiting after enabling Ethernet")
+                return recovered
+
+            # Пытаемся подключиться к устройству по telnet, чтобы инициировать трафик
+            write_log(
+                f"Recover MACs via telnet: trying to connect to device at {device_default_ip} "
+                f"from port 1/0/{port_id}"
+            )
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5.0)
+                sock.connect((device_default_ip, 23))
+                # Просто устанавливаем соединение и сразу закрываем
+                sock.close()
+            except Exception as e:
+                write_log(f"Recover MACs via telnet: connection to {device_default_ip}:23 failed: {e}")
+                login_failed_ports.append(port_id)
+
+            # Перечитываем MAC-таблицу для данного порта
+            resp = snr.write_command(f"show mac-address-table interface eth1/0/{port_id}")
+            match = MAC_RE.search(resp)
+            if match:
+                mac = match.group(0)
+                recovered[port_id] = _mac_to_serial(mac)
+                write_log(f"Recover MACs via telnet: got MAC {mac} on port 1/0/{port_id}")
+            else:
+                write_log(f"Recover MACs via telnet: still no MAC on port 1/0/{port_id}")
+
+            # Снова выключаем Ethernet на порту, остальные остаются выключенными
+            snr.write_command(f"int eth1/0/{port_id}")
+            snr.write_command("shutdown")
+            snr.write_command("exit")
+
+        if login_failed_ports:
+            ports_str = ", ".join(str(p) for p in sorted(set(login_failed_ports)))
+            write_log(
+                "Recover MACs via telnet: devices on the following ports could not be reached via telnet "
+                f"and may require factory reset: [{ports_str}]"
+            )
+
+        # В конце возвращаем Ethernet на всех портах в исходное (включенное) состояние,
+        # чтобы дальше основной тест шёл как обычно.
+        write_log("Recover MACs via telnet: re-enabling Ethernet on all ports")
+        for port_id in all_ports:
+            if stop_event is not None and stop_event.is_set():
+                raise StopRequested()
+            snr.write_command(f"int eth1/0/{port_id}")
+            snr.write_command("no shutdown")
+            snr.write_command("exit")
+    finally:
+        snr.disconnect()
+
+    return recovered
+
+
+def _get_port_serials(host, username, password, ports, stop_event, write_log):
     snr = _open_snr(host, username, password, stop_event, write_log, enter_config=False)
-    port_to_sn: Dict[int, str] = {}
+    port_to_sn = {}
     try:
         for port_id in ports:
             if stop_event is not None and stop_event.is_set():
@@ -149,15 +231,13 @@ def _get_port_serials(
     return port_to_sn
 
 
-def run_test(
-    stop_event: Optional["threading.Event"] = None,
-    log_callback: Optional[Callable[[str], None]] = None,
-) -> None:
+def run_test(stop_event=None, log_callback=None):
     tsc = TSystemController(log_callback=log_callback)
 
     poe_switch_host = FORM_DATA["devices_config"]["poe_switch_host"]
     username = FORM_DATA["devices_config"].get("username", "")
     password = FORM_DATA["devices_config"].get("password", "")
+    device_default_ip = FORM_DATA["devices_config"].get("device_default_ip", "")
     selected_ports = FORM_DATA["devices_config"].get("ports", list(range(1, 25)))
     all_ports = [p for p in selected_ports if isinstance(p, int) and p > 0]
 
@@ -171,10 +251,10 @@ def run_test(
         tsc.write_log("No ports selected, stopping test")
         return
 
-    extra_monitor_ports: Dict[int, float] = {}
-    permanently_excluded_ports: set[int] = set()
+    extra_monitor_ports = {}
+    permanently_excluded_ports = set()
 
-    port_up_totals: Dict[int, int] = {p: 0 for p in all_ports}
+    port_up_totals = {p: 0 for p in all_ports}
     tsc.write_csv("#,param|dev," + ",".join(f"dev_{p}" for p in all_ports) + ",")
 
     try:
@@ -204,7 +284,7 @@ def run_test(
         tsc.write_log("Pre-check: broadcast ping to initialize MAC addresses")
         _ping_broadcast(poe_switch_host, tsc.write_log)
 
-        port_serials: Dict[int, str] = {}
+        port_serials = {}
         for attempt in range(10):
             if stop_event is not None and stop_event.is_set():
                 tsc.write_log("Stop requested, ending test")
@@ -227,12 +307,39 @@ def run_test(
                 if _sleep_with_stop(10, stop_event):
                     tsc.write_log("Stop requested, ending test")
                     return
-        else:
+        # Если после 10 попыток всё ещё есть порты без MAC, пробуем дополнительный способ.
+        ports_without_mac = [p for p in all_ports if port_serials.get(p) == "NA"]
+        if ports_without_mac:
             tsc.write_log(
-                f"Pre-check failed: after 10 attempts not all ports have MAC addresses. "
-                f"Missing: {ports_without_mac}. Test aborted."
+                "Pre-check: not all ports have MAC addresses after 10 attempts, "
+                "trying recovery via telnet to devices"
             )
-            return
+            recovered = _recover_macs_via_device_telnet(
+                poe_switch_host,
+                username,
+                password,
+                all_ports,
+                ports_without_mac,
+                device_default_ip,
+                stop_event,
+                tsc.write_log,
+            )
+            # обновляем serials для успешно восстановленных портов
+            for port_id, serial in recovered.items():
+                port_serials[port_id] = serial
+
+            ports_without_mac = [p for p in all_ports if port_serials.get(p) == "NA"]
+            if ports_without_mac:
+                tsc.write_log(
+                    "Pre-check failed: after additional recovery via telnet not all "
+                    f"ports have MAC addresses. Missing: {ports_without_mac}. Test aborted."
+                )
+                return
+            else:
+                tsc.write_log(
+                    "Pre-check: all ports have MAC addresses after recovery via telnet, "
+                    "starting main test"
+                )
 
         sn_values = ",".join(port_serials.get(p, "NA") for p in all_ports)
         tsc.write_csv(f"sn,serial,{sn_values},")
@@ -276,7 +383,7 @@ def run_test(
             check_start = time.time()
 
             ports_to_check = set(ports_to_cycle) | set(extra_monitor_ports.keys())
-            ports_confirmed_up: set[int] = set()
+            ports_confirmed_up = set()
 
             tsc.write_log(f"Checking ports for {check_duration} sec: {sorted(ports_to_check)}")
 
@@ -363,7 +470,7 @@ def run_test(
 
 
 class TSystemController:
-    def __init__(self, log_callback: Optional[Callable[[str], None]] = None) -> None:
+    def __init__(self, log_callback=None):
         self.local_launch_mode = MODE != "tsystem"
         self.log_callback = log_callback
 
@@ -392,7 +499,7 @@ class TSystemController:
             self.log_writer = logging.getLogger("log")
             self.csv_writer = logging.getLogger("csv")
 
-    def setup_writer(self, logger_name: str, log_file: str, level: int = logging.INFO) -> None:
+    def setup_writer(self, logger_name, log_file, level=logging.INFO):
         logger = logging.getLogger(logger_name)
         formatter = logging.Formatter("%(message)s")
         file_handler = logging.FileHandler(log_file, mode="w")
@@ -400,13 +507,13 @@ class TSystemController:
         logger.setLevel(level)
         logger.addHandler(file_handler)
 
-    def write_csv(self, data: str) -> None:
+    def write_csv(self, data):
         self.csv_writer.info(data)
 
         if not self.local_launch_mode:
             self.uds_csv_socket.sendall(data.encode() + b"\n")
 
-    def write_log(self, data: str) -> None:
+    def write_log(self, data):
         message = f"[ {datetime.now().strftime('%d/%m/%y - %H:%M:%S.%f')[:-3]} ] {data}"
         self.log_writer.info(message)
 
@@ -418,35 +525,28 @@ class TSystemController:
         else:
             print(message)
 
-    def write_remaining_time(self, value: int) -> None:
+    def write_remaining_time(self, value):
         if self.local_launch_mode:
             print(f"[ {datetime.now().strftime('%d/%m/%y - %H:%M:%S.%f')[:-3]} ] Remaining time: {timedelta(seconds=value)}")
         else:
             self.uds_time_socket.sendall(str(value).encode())
 
-    def write_remaiming_time(self, value: int) -> None:
+    def write_remaiming_time(self, value):
         self.write_remaining_time(value)
 
 
 class TelnetSNRController:
-    def __init__(
-        self,
-        host: str,
-        port: int = 23,
-        write_log=lambda data: (print(data), sys.stdout.flush()),
-        stop_event: Optional["threading.Event"] = None,
-        debug_snr: bool = True,
-    ) -> None:
+    def __init__(self, host, port=23, write_log=lambda data: (print(data), sys.stdout.flush()), stop_event=None, debug_snr=True):
         self.host = host
         self.port = port
         self.write_log = write_log
         self.stop_event = stop_event
         self.debug_snr = debug_snr
-        self.socket: Optional[socket.socket] = None
+        self.socket = None
         self.timeout = 15.0
         self.connect()
 
-    def connect(self) -> None:
+    def connect(self):
         retry_delay = 3.0
         attempt = 0
         while True:
@@ -467,7 +567,7 @@ class TelnetSNRController:
                 self.write_log(f"({self.host}:{self.port}) Connection error (attempt {attempt}): {e}. Retrying in {retry_delay}s...")
                 time.sleep(retry_delay)
 
-    def _read_until(self, expected: bytes, timeout: Optional[float] = None) -> bytes:
+    def _read_until(self, expected, timeout=None):
         if self.socket is None:
             raise ValueError(f"({self.host}:{self.port}) Telnet connection error...")
 
@@ -485,7 +585,7 @@ class TelnetSNRController:
                 break
         return buffer
 
-    def _read_available(self, timeout: float = 0.5) -> bytes:
+    def _read_available(self, timeout=0.5):
         if self.socket is None:
             raise ValueError(f"({self.host}:{self.port}) Telnet connection error...")
 
@@ -501,7 +601,7 @@ class TelnetSNRController:
             pass
         return buffer
 
-    def disconnect(self) -> None:
+    def disconnect(self):
         if self.socket is not None:
             try:
                 self.socket.close()
@@ -509,7 +609,7 @@ class TelnetSNRController:
                 pass
             self.socket = None
 
-    def write_command(self, message: str, device_prompt_bytes=b"#", shadow: bool = False) -> str:
+    def write_command(self, message, device_prompt_bytes=b"#", shadow=False):
         retry_delay = 3.0
         attempt = 0
         while True:
@@ -538,11 +638,7 @@ class TelnetSNRController:
                 self.connect()
 
 
-def main(
-    config: Optional[Dict[str, Any]] = None,
-    stop_event: Optional["threading.Event"] = None,
-    log_callback: Optional[Callable[[str], None]] = None,
-) -> None:
+def main(config=None, stop_event=None, log_callback=None):
     global FORM_DATA
     if config is not None:
         FORM_DATA = config
