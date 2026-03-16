@@ -1,4 +1,4 @@
-FORM_DATA = {
+﻿FORM_DATA = {
     "devices_config": {
         "poe_switch_host": "127.0.0.1",
         "username": "user",
@@ -136,7 +136,6 @@ def _recover_macs_via_device_telnet(
     login_failed_ports = []
     snr = _open_snr(poe_switch_host, username, password, stop_event, write_log, enter_config=True)
     try:
-        # Выключаем Ethernet на всех портах (PoE не трогаем)
         for port_id in all_ports:
             if stop_event is not None and stop_event.is_set():
                 raise StopRequested()
@@ -144,7 +143,6 @@ def _recover_macs_via_device_telnet(
             snr.write_command("shutdown")
             snr.write_command("exit")
 
-        # Поочередно работаем с каждым портом без MAC
         for port_id in ports_without_mac:
             if stop_event is not None and stop_event.is_set():
                 raise StopRequested()
@@ -154,12 +152,10 @@ def _recover_macs_via_device_telnet(
             snr.write_command("no shutdown")
             snr.write_command("exit")
 
-            # Даём порту подняться
             if _sleep_with_stop(5, stop_event):
                 write_log("Stop requested while waiting after enabling Ethernet")
                 return recovered
 
-            # Пытаемся подключиться к устройству по telnet, чтобы инициировать трафик
             write_log(
                 f"Recover MACs via telnet: trying to connect to device at {device_default_ip} "
                 f"from port 1/0/{port_id}"
@@ -168,13 +164,11 @@ def _recover_macs_via_device_telnet(
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(5.0)
                 sock.connect((device_default_ip, 23))
-                # Просто устанавливаем соединение и сразу закрываем
                 sock.close()
             except Exception as e:
                 write_log(f"Recover MACs via telnet: connection to {device_default_ip}:23 failed: {e}")
                 login_failed_ports.append(port_id)
 
-            # Перечитываем MAC-таблицу для данного порта
             resp = snr.write_command(f"show mac-address-table interface eth1/0/{port_id}")
             match = MAC_RE.search(resp)
             if match:
@@ -184,7 +178,6 @@ def _recover_macs_via_device_telnet(
             else:
                 write_log(f"Recover MACs via telnet: still no MAC on port 1/0/{port_id}")
 
-            # Снова выключаем Ethernet на порту, остальные остаются выключенными
             snr.write_command(f"int eth1/0/{port_id}")
             snr.write_command("shutdown")
             snr.write_command("exit")
@@ -196,8 +189,6 @@ def _recover_macs_via_device_telnet(
                 f"and may require factory reset: [{ports_str}]"
             )
 
-        # В конце возвращаем Ethernet на всех портах в исходное (включенное) состояние,
-        # чтобы дальше основной тест шёл как обычно.
         write_log("Recover MACs via telnet: re-enabling Ethernet on all ports")
         for port_id in all_ports:
             if stop_event is not None and stop_event.is_set():
