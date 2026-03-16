@@ -276,11 +276,11 @@ def run_test(stop_event=None, log_callback=None):
         _ping_broadcast(poe_switch_host, tsc.write_log)
 
         port_serials = {}
-        for attempt in range(10):
+        for attempt in range(3):
             if stop_event is not None and stop_event.is_set():
                 tsc.write_log("Stop requested, ending test")
                 return
-            tsc.write_log(f"Pre-check: MAC check attempt {attempt + 1}/10")
+            tsc.write_log(f"Pre-check: MAC check attempt {attempt + 1}/3")
             port_serials = _get_port_serials(
                 poe_switch_host,
                 username,
