@@ -1,4 +1,4 @@
-FORM_DATA = {
+﻿FORM_DATA = {
     "devices_config": {
         "poe_switch_host": "127.0.0.1",
         "username": "user",
@@ -285,7 +285,7 @@ def run_test(stop_event=None, log_callback=None):
                 tsc.write_log("Pre-check: all ports have MAC addresses, starting main test")
                 break
             tsc.write_log(f"Pre-check: ports without MAC: {ports_without_mac}")
-            if attempt < 9:
+            if attempt < 2:
                 if _sleep_with_stop(10, stop_event):
                     tsc.write_log("Stop requested, ending test")
                     return
