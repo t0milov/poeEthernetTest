@@ -1,4 +1,4 @@
-﻿FORM_DATA = {
+FORM_DATA = {
     "devices_config": {
         "poe_switch_host": "127.0.0.1",
         "username": "user",
@@ -241,7 +241,6 @@ def run_test(stop_event=None, log_callback=None):
     tsc.write_csv("#,param|dev," + ",".join(f"dev_{p}" for p in all_ports) + ",")
 
     try:
-        # Pre-check: clear MAC table, then enable all ports, wait power_on_duration, then verify MACs (10 attempts, 10 sec apart)
         tsc.write_log("Pre-check: clearing MAC address table on ports")
         _clear_port_mac_addresses(
             poe_switch_host,
@@ -290,7 +289,6 @@ def run_test(stop_event=None, log_callback=None):
                 if _sleep_with_stop(10, stop_event):
                     tsc.write_log("Stop requested, ending test")
                     return
-        # Если после 10 попыток всё ещё есть порты без MAC, пробуем дополнительный способ.
         ports_without_mac = [p for p in all_ports if port_serials.get(p) == "NA"]
         if ports_without_mac:
             tsc.write_log(
@@ -446,6 +444,19 @@ def run_test(stop_event=None, log_callback=None):
                 if _sleep_with_stop(power_off_duration, stop_event):
                     tsc.write_log("Stop requested, ending test")
                     return
+
+        # Итоговая таблица по "плохим" устройствам (у которых было меньше успешных итераций, чем всего итераций)
+        bad_ports = [p for p in all_ports if port_up_totals.get(p, 0) < iteration_number]
+        tsc.write_log("Bad devices")
+        if not bad_ports:
+            tsc.write_log("No bad devices detected")
+        else:
+            tsc.write_csv("bad_devices,#,port,sn,successful_iterations,")
+            for idx, p in enumerate(sorted(bad_ports), start=1):
+                sn = port_serials.get(p, "NA")
+                success = port_up_totals.get(p, 0)
+                tsc.write_log(f"#{idx} | port: {p} | SN: {sn} | Total: {success}")
+                tsc.write_csv(f"{idx},{p},{sn},{success},")
     except StopRequested:
         tsc.write_log("Stop requested, ending test")
         return
