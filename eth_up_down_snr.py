@@ -1,4 +1,4 @@
-FORM_DATA = {
+﻿FORM_DATA = {
     "devices_config": {
         "poe_switch_host": "127.0.0.1",
         "username": "user",
@@ -19,6 +19,7 @@ import os
 import sys
 import logging
 import socket
+import subprocess
 import time
 import re
 
@@ -59,6 +60,21 @@ def _open_snr(
     return snr
 
 
+def _ping_broadcast(
+    host: str,
+    write_log: Optional[Callable[[str], None]] = None,
+) -> None:
+    """Send broadcast ping to switch host to help initialize MAC addresses on switch."""
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["ping", "-n", "5", host], capture_output=True, timeout=10)
+        else:
+            subprocess.run(["ping", "-b", "-c", "5", host], capture_output=True, timeout=10)
+    except Exception as e:
+        if write_log:
+            write_log(f"Broadcast ping to {host} failed: {e}")
+
+
 def _sleep_with_stop(seconds: int, stop_event: Optional["threading.Event"]) -> bool:
     if stop_event is None:
         time.sleep(seconds)
@@ -88,6 +104,24 @@ def _mac_to_serial(mac: str) -> str:
     return str(serial_value).zfill(SERIAL_LENGTH)
 
 
+def _clear_port_mac_addresses(
+    host: str,
+    username: str,
+    password: str,
+    ports: list[int],
+    stop_event: Optional["threading.Event"],
+    write_log: Optional[Callable[[str], None]],
+) -> None:
+    snr = _open_snr(host, username, password, stop_event, write_log, enter_config=False)
+    try:
+        for port_id in ports:
+            if stop_event is not None and stop_event.is_set():
+                raise StopRequested()
+            snr.write_command(f"clear mac-address-table dynamic interface ethernet 1/0/{port_id}")
+    finally:
+        snr.disconnect()
+
+
 def _get_port_serials(
     host: str,
     username: str,
@@ -96,14 +130,13 @@ def _get_port_serials(
     stop_event: Optional["threading.Event"],
     write_log: Optional[Callable[[str], None]],
 ) -> Dict[int, str]:
-    snr = _open_snr(host, username, password, stop_event, write_log, enter_config=True)
+    snr = _open_snr(host, username, password, stop_event, write_log, enter_config=False)
     port_to_sn: Dict[int, str] = {}
     try:
         for port_id in ports:
             if stop_event is not None and stop_event.is_set():
                 raise StopRequested()
 
-            snr.write_command(f"clear mac-address-table dynamic interface ethernet 1/0/{port_id}")
             resp = snr.write_command(f"show mac-address-table interface eth1/0/{port_id}")
             match = MAC_RE.search(resp)
             if match:
@@ -145,7 +178,16 @@ def run_test(
     tsc.write_csv("#,param|dev," + ",".join(f"dev_{p}" for p in all_ports) + ",")
 
     try:
-        # Pre-check: enable all ports, wait power_on_duration, then verify MACs (10 attempts, 10 sec apart)
+        # Pre-check: clear MAC table, then enable all ports, wait power_on_duration, then verify MACs (10 attempts, 10 sec apart)
+        tsc.write_log("Pre-check: clearing MAC address table on ports")
+        _clear_port_mac_addresses(
+            poe_switch_host,
+            username,
+            password,
+            all_ports,
+            stop_event,
+            tsc.write_log,
+        )
         tsc.write_log("Pre-check: enabling all ports")
         snr = _open_snr(poe_switch_host, username, password, stop_event, tsc.write_log, enter_config=True)
         for port_id in all_ports:
@@ -158,6 +200,9 @@ def run_test(
         if _sleep_with_stop(power_on_duration, stop_event):
             tsc.write_log("Stop requested, ending test")
             return
+
+        tsc.write_log("Pre-check: broadcast ping to initialize MAC addresses")
+        _ping_broadcast(poe_switch_host, tsc.write_log)
 
         port_serials: Dict[int, str] = {}
         for attempt in range(10):
