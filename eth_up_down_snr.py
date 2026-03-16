@@ -115,14 +115,6 @@ def _recover_macs_via_device_telnet(
     stop_event,
     write_log,
 ):
-    """Дополнительный способ получения MAC-адресов:
-    - Оставляем PoE включённым.
-    - Выключаем Ethernet (shutdown) на всех портах.
-    - Для каждого проблемного порта:
-        * включаем Ethernet (no shutdown),
-        * пытаемся подключиться по telnet к device_default_ip,
-        * перечитываем MAC-таблицу для порта.
-    """
     if not device_default_ip:
         write_log("Recover MACs via telnet skipped: device_default_ip is empty")
         return {}
@@ -315,7 +307,6 @@ def run_test(stop_event=None, log_callback=None):
                 stop_event,
                 tsc.write_log,
             )
-            # обновляем serials для успешно восстановленных портов
             for port_id, serial in recovered.items():
                 port_serials[port_id] = serial
 
